@@ -82,6 +82,11 @@ MANUAL_LOGIN_PASS = _require_env('MANUAL_LOGIN_PASS')
 # confondre veut dire qu'une fuite de l'un expose l'autre.
 API_KEY = _require_env('API_KEY')
 
+# --- Scripts "en continu" sur serveur distant (BotJanus Agent, voir routes_services.py) ---
+# Optionnels : sans eux la carte affiche "Agent non configuré" et rien d'autre ne casse.
+AGENT_URL = os.environ.get('AGENT_URL', '')      # ex : https://bots.exemple.org/agent
+AGENT_TOKEN = os.environ.get('AGENT_TOKEN', '')  # même valeur que dans le .env de l'agent
+
 ROLE_NONE = "None"
 ROLE_COLLAB = "Collaborateur"
 ROLE_ADMIN = "Admin"
@@ -100,6 +105,7 @@ TRANSLATIONS = {
         'connect_btn': 'Se connecter', 'lang_tag': 'Langue', 'role_tag': 'Rôle', 'days': 'jours',
         'error_auth': 'Erreur d\'authentification : Réservé à la connexion manuelle.', 'error_manual_login': 'Identifiants incorrects.',
         'contact': '✉️ Contact', 'messages': '📩 Messages',
+        'card_temp': 'Scripts temporaires', 'card_cont': 'Scripts continus', 'manage': 'Gérer',
         'nav_home': 'Accueil', 'nav_logs': 'Logs', 'nav_account': 'Mon compte', 'nav_admin': 'Administration', 'nav_logout': 'Quitter', 'nav_login': 'Connexion',
         'error_not_autopatrolled': "Accès refusé : votre compte Vikidia n'a pas le statut Autopatrolleur (ou supérieur) sur une des versions linguistiques prises en charge.",
         'promoted_msg': "✅ Statut Autopatrolleur détecté : vous êtes désormais Collaborateur. Script lancé.",
@@ -118,6 +124,7 @@ TRANSLATIONS = {
         'username_ph': 'Username', 'password_ph': 'Password', 'connect_btn': 'Connect', 'lang_tag': 'Language',
         'role_tag': 'Role', 'days': 'days', 'error_auth': 'Auth Error: Manual login only.', 'error_manual_login': 'Incorrect credentials.',
         'contact': '✉️ Contact', 'messages': '📩 Messages',
+        'card_temp': 'Temporary scripts', 'card_cont': 'Continuous scripts', 'manage': 'Manage',
         'nav_home': 'Home', 'nav_logs': 'Logs', 'nav_account': 'My account', 'nav_admin': 'Administration', 'nav_logout': 'Log out', 'nav_login': 'Sign in',
         'error_not_autopatrolled': "Access denied: your Vikidia account does not have Autopatrolled status (or higher) on any supported language edition.",
         'promoted_msg': "✅ Autopatrolled status detected: you are now a Collaborator. Script started.",
@@ -415,12 +422,14 @@ def create_app():
     from routes_user import auth_bp, dashboard_bp, api_bp
     from routes_admin import admin_bp
     from routes_contact import contact_bp
+    from routes_services import services_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(contact_bp)
+    app.register_blueprint(services_bp)
 
     app.teardown_appcontext(close_connection)
 
