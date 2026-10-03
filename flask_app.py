@@ -83,8 +83,8 @@ MANUAL_LOGIN_PASS = _require_env('MANUAL_LOGIN_PASS')
 API_KEY = _require_env('API_KEY')
 
 # --- Scripts "en continu" sur serveur distant (BotJanus Agent, voir routes_services.py) ---
-# Optionnels : sans eux la carte affiche "Agent non configuré" et rien d'autre ne casse.
-AGENT_URL = os.environ.get('AGENT_URL', '')      # ex : https://bots.exemple.org/agent
+# C'est l'AGENT qui appelle le dashboard (POST /api/agent/sync) avec ce jeton : aucun port à
+# ouvrir sur le serveur distant. Sans AGENT_TOKEN la fonction est simplement désactivée.
 AGENT_TOKEN = os.environ.get('AGENT_TOKEN', '')  # même valeur que dans le .env de l'agent
 
 ROLE_NONE = "None"
@@ -208,6 +208,15 @@ def init_db(app):
             msg_cols = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
             if "github_id" in msg_cols and "wiki_id" not in msg_cols:
                 db.execute("ALTER TABLE messages RENAME COLUMN github_id TO wiki_id")
+            # Scripts continus (agent distant qui appelle le dashboard, voir routes_services.py)
+            db.execute('''CREATE TABLE IF NOT EXISTS agent_snapshot (
+                            id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT, logs TEXT,
+                            updated_at REAL, watch_until REAL DEFAULT 0)''')
+            db.execute("INSERT OR IGNORE INTO agent_snapshot (id, data, logs, updated_at) VALUES (1, '[]', '{}', 0)")
+            db.execute('''CREATE TABLE IF NOT EXISTS agent_commands (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT, service_id TEXT, action TEXT,
+                            requested_by TEXT, requested_at REAL, status TEXT DEFAULT 'pending',
+                            result TEXT, done_at REAL)''')
             db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('lock_launch', '0')")
             db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('captcha_enabled', '0')")
             db.commit()
@@ -433,7 +442,8 @@ def create_app():
 
     app.teardown_appcontext(close_connection)
 
-    EXEMPT_ENDPOINTS = {'auth.security_gate', 'auth.verify_gate', 'static', 'auth.callback_wiki', 'auth.login_wiki'}
+    EXEMPT_ENDPOINTS = {'auth.security_gate', 'auth.verify_gate', 'static', 'auth.callback_wiki', 'auth.login_wiki',
+                        'services.agent_sync'}  # l'agent distant s'authentifie par jeton, pas par session
 
     @app.before_request
     def check_security_gate():

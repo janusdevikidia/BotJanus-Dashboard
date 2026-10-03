@@ -1075,7 +1075,8 @@ _SVC_ADMIN_JS = r"""
     var CSRF = document.querySelector('meta[name="csrf-token"]').content;
     var LABELS = {ok: "En marche", degraded: "Dégradé", down: "Hors service", stopped: "Arrêté"};
     var CLS = {ok: "tag-ok", degraded: "tag-warn", down: "tag-err", stopped: "tag-muted"};
-    var logTimer = null, logId = null, busy = false;
+    var ACT_LABEL = {start: "démarrage", stop: "arrêt", restart: "relance"};
+    var logTimer = null, logId = null, sending = false, watching = {};
 
     function fmtDur(sec) {
         if (sec == null) return "—";
@@ -1085,25 +1086,39 @@ _SVC_ADMIN_JS = r"""
     function mk(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 
     function act(id, action) {
-        if (busy) return;
+        if (sending) return;
         if (action === "stop" && !confirm("Arrêter ce script ? Il ne sera pas relancé automatiquement.")) return;
-        busy = true; load();
+        sending = true;
         fetch("/admin/services/" + encodeURIComponent(id) + "/" + action, {method: "POST", headers: {"X-CSRFToken": CSRF}})
             .then(function (r) { return r.json(); })
-            .then(function (j) { window.toast(j.message || "—", {type: j.ok ? "success" : "error"}); })
+            .then(function (j) {
+                if (j.ok) { watching[j.command_id] = action; window.toast(j.message, {type: "info", title: "Ordre envoyé"}); }
+                else window.toast(j.message || "Erreur.", {type: "error"});
+            })
             .catch(function () { window.toast("Erreur réseau.", {type: "error"}); })
-            .finally(function () { busy = false; load(); });
+            .finally(function () { sending = false; load(); });
+    }
+
+    function checkResults(services) {
+        services.forEach(function (s) {
+            var c = s.last_command;
+            if (!c || !(c.id in watching)) return;
+            if (c.status === "done") { window.toast(s.label + " : " + (ACT_LABEL[c.action] || c.action) + " effectué. " + (c.result || ""), {type: "success"}); delete watching[c.id]; }
+            else if (c.status === "failed" || c.status === "expired") { window.toast(s.label + " : " + (c.result || "échec"), {type: "error"}); delete watching[c.id]; }
+        });
     }
 
     function render(res) {
         var box = document.getElementById("svcAdminList"); box.textContent = "";
-        document.getElementById("svcStamp").textContent = "maj " + new Date().toLocaleTimeString();
+        document.getElementById("svcStamp").textContent = res.last_contact_age_s != null ? "agent vu il y a " + res.last_contact_age_s + " s" : "";
         if (!res.reachable) { box.appendChild(mk("div", "notice", res.error)); return; }
         if (!res.services.length) { box.appendChild(mk("p", "small", "Aucun script continu configuré.")); return; }
+        checkResults(res.services);
         res.services.forEach(function (s) {
             var it = mk("div", "svc-item"), head = mk("div", "svc-head");
             head.appendChild(mk("span", "svc-name", s.label));
             head.appendChild(mk("span", "tag " + (CLS[s.health] || ""), LABELS[s.health] || s.health));
+            if (s.pending_action) head.appendChild(mk("span", "tag tag-warn", "⏳ " + (ACT_LABEL[s.pending_action] || s.pending_action) + " en cours"));
             it.appendChild(head);
             if (s.description) it.appendChild(mk("div", "svc-meta", s.description));
             var m = [s.health_reason];
@@ -1119,10 +1134,10 @@ _SVC_ADMIN_JS = r"""
             if (s.last_exit) it.appendChild(mk("div", "svc-meta", "Dernière sortie : " + s.last_exit));
             if (s.last_action) it.appendChild(mk("div", "svc-meta", "Dernière action : " + s.last_action + " (" + s.last_action_by + ")"));
             if (s.last_error) it.appendChild(mk("div", "svc-err", (s.last_error.time || "") + " " + s.last_error.message));
-            var ac = mk("div", "svc-actions");
+            var ac = mk("div", "svc-actions"), lock = !!s.pending_action || sending;
             [["start", "Démarrer", "btn-primary", !s.running], ["restart", "Relancer", "btn-secondary", true],
              ["stop", "Arrêter", "btn-danger", s.running]].forEach(function (a) {
-                var b = mk("button", "btn btn-sm " + a[2], a[1]); b.type = "button"; b.disabled = !a[3] || busy;
+                var b = mk("button", "btn btn-sm " + a[2], a[1]); b.type = "button"; b.disabled = !a[3] || lock;
                 b.onclick = function () { act(s.id, a[0]); }; ac.appendChild(b);
             });
             var lb = mk("button", "btn btn-sm btn-secondary", "Journal"); lb.type = "button";
@@ -1131,25 +1146,26 @@ _SVC_ADMIN_JS = r"""
         });
     }
     function load() {
-        fetch("/api/services/status").then(function (r) { return r.json(); }).then(render)
+        /* watch=1 : prévient le dashboard qu'un admin regarde => l'agent appelle toutes les ~4 s */
+        fetch("/api/services/status?watch=1").then(function (r) { return r.json(); }).then(render)
             .catch(function () { render({reachable: false, error: "Dashboard injoignable."}); });
     }
     function fetchLogs() {
         fetch("/admin/services/" + encodeURIComponent(logId) + "/logs?lines=150").then(function (r) { return r.json(); }).then(function (j) {
             var b = document.getElementById("logBox2"), atEnd = b.scrollHeight - b.clientHeight <= b.scrollTop + 50;
             b.textContent = "";
-            (j.lines || [j.error || "—"]).forEach(function (l) { b.appendChild(mk("div", null, l)); });
+            (j.lines && j.lines.length ? j.lines : [j.error || "—"]).forEach(function (l) { b.appendChild(mk("div", null, l)); });
             if (atEnd) b.scrollTop = b.scrollHeight;
         }).catch(function () {});
     }
     function openLogs(id, label) {
         logId = id; document.getElementById("logTitle").textContent = "Journal — " + label;
         document.getElementById("logPanel").hidden = false; fetchLogs();
-        clearInterval(logTimer); logTimer = setInterval(fetchLogs, 3000);
+        clearInterval(logTimer); logTimer = setInterval(fetchLogs, 4000);
         document.getElementById("logBox2").scrollTop = 1e9;
     }
     function closeLogs() { document.getElementById("logPanel").hidden = true; clearInterval(logTimer); }
-    load(); setInterval(function () { if (!busy) load(); }, 8000);
+    load(); setInterval(function () { if (!sending) load(); }, 4000);
 </script>
 """
 
