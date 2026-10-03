@@ -11,6 +11,7 @@ page de contrôle ou qu'un ordre est en attente.
 
 Routes :
   POST /api/agent/sync                    agent  : jeton Bearer (AGENT_TOKEN)
+  GET  /api/services/logs?after=<id>      bot Discord : clé API (X-API-Key) ; nouvelles lignes de logs
   GET  /api/services/status               public : état résumé (carte) ; ?watch=1 = page admin ouverte
   GET  /admin/services                    admin  : page de contrôle
   GET  /admin/services/<id>/logs          admin  : dernières lignes de journal (JSON)
@@ -23,7 +24,7 @@ import time
 
 from flask import Blueprint, jsonify, render_template_string, request, session
 
-from flask_app import ROLE_ADMIN, AGENT_TOKEN, check_role, csrf, get_db, log_to_db
+from flask_app import ROLE_ADMIN, AGENT_TOKEN, check_role, csrf, get_db, log_to_db, require_api_key
 from templates import GLASS_CSS, ADMIN_SERVICES_HTML
 
 services_bp = Blueprint("services", __name__)
@@ -36,6 +37,8 @@ PENDING_TTL = 180                    # s : un ordre non récupéré par l'agent 
 SENT_TTL = 300                       # s : un ordre récupéré sans résultat expire
 MAX_BODY = 512 * 1024
 ACTIONS = ("start", "stop", "restart")
+LOG_HISTORY_MAX = 5000               # lignes conservées au total dans service_log_lines
+LOG_API_MAX = 500                    # lignes max renvoyées par appel à /api/services/logs
 
 
 def _token_ok():
@@ -50,6 +53,16 @@ def _snapshot(db):
         return json.loads(row["data"]), json.loads(row["logs"]), row["updated_at"] or 0, row["watch_until"] or 0
     except Exception:
         return [], {}, 0, 0
+
+
+def _new_lines(previous, current):
+    """Lignes de `current` qui ne figuraient pas déjà dans `previous`. L'agent renvoie à chaque
+    appel la fin du journal (fenêtre glissante) : on cherche le plus long suffixe de `previous`
+    qui est aussi le début de `current`, tout ce qui suit est nouveau."""
+    for k in range(min(len(previous), len(current)), 0, -1):
+        if previous[-k:] == current[:k]:
+            return current[k:]
+    return current
 
 
 def _is_admin(db):
@@ -80,6 +93,15 @@ def agent_sync():
 
     db = get_db()
     now = time.time()
+    _s, old_logs, _u, _w = _snapshot(db)
+    labels = {str(s.get("id")): s.get("label") or str(s.get("id")) for s in services}
+    for sid, lines in clean_logs.items():
+        fresh = _new_lines(old_logs.get(sid, []), lines)
+        if fresh:
+            db.executemany("INSERT INTO service_log_lines (service_id, label, ts, line) VALUES (?,?,?,?)",
+                           [(sid, labels.get(sid, sid), now, l) for l in fresh])
+    db.execute("DELETE FROM service_log_lines WHERE id <= (SELECT MAX(id) FROM service_log_lines) - ?",
+               (LOG_HISTORY_MAX,))
     db.execute("UPDATE agent_snapshot SET data=?, logs=?, updated_at=? WHERE id=1",
                (json.dumps(services), json.dumps(clean_logs), now))
     for r in results[:50]:
@@ -166,6 +188,33 @@ def services_status():
                 item["last_command"] = last.get(item["id"])
     return jsonify(reachable=reachable, error=error, is_admin=admin,
                    last_contact_age_s=int(age) if age is not None else None, services=out)
+
+
+@services_bp.route("/api/services/logs")
+@csrf.exempt
+@require_api_key
+def api_service_logs():
+    """Passerelle vers le bot Discord : lignes de logs des scripts continus arrivées après le
+    curseur `after` (id de la dernière ligne déjà vue). `after=latest` ne renvoie aucune ligne,
+    seulement le curseur courant (le bot l'utilise au premier démarrage pour ne pas rejouer
+    tout l'historique). Réponse : {lines: [{id, service, label, ts, line}], last_id}."""
+    db = get_db()
+    raw = request.args.get("after", "latest")
+    top = db.execute("SELECT COALESCE(MAX(id), 0) FROM service_log_lines").fetchone()[0]
+    if raw == "latest":
+        return jsonify(lines=[], last_id=top)
+    try:
+        after = int(raw)
+    except ValueError:
+        return jsonify(error="paramètre 'after' invalide"), 400
+    if after > top:     # curseur d'avant une réinitialisation de la base : on repart du courant
+        return jsonify(lines=[], last_id=top, reset=True)
+    limit = max(1, min(request.args.get("limit", LOG_API_MAX, type=int), LOG_API_MAX))
+    rows = db.execute("SELECT id, service_id, label, ts, line FROM service_log_lines "
+                      "WHERE id > ? ORDER BY id LIMIT ?", (after, limit)).fetchall()
+    lines = [{"id": r["id"], "service": r["service_id"], "label": r["label"],
+              "ts": r["ts"], "line": r["line"]} for r in rows]
+    return jsonify(lines=lines, last_id=lines[-1]["id"] if lines else after)
 
 
 @services_bp.route("/admin/services")
