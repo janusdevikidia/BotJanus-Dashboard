@@ -1,8 +1,5 @@
 """Scripts "en continu" hébergés sur un serveur distant (via BotJanus Agent).
 
-Sens des échanges : c'est l'AGENT qui appelle le dashboard (aucun port à ouvrir côté
-serveur distant, marche derrière une box / IP dynamique / compte PythonAnywhere gratuit).
-
   Agent  --POST /api/agent/sync (jeton)-->  Dashboard
          { état de santé des scripts, derniers logs, résultats des ordres exécutés }
          <-- { ordres en attente (start/stop/restart), délai avant le prochain appel } --
