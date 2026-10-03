@@ -217,6 +217,11 @@ def init_db(app):
                             id INTEGER PRIMARY KEY AUTOINCREMENT, service_id TEXT, action TEXT,
                             requested_by TEXT, requested_at REAL, status TEXT DEFAULT 'pending',
                             result TEXT, done_at REAL)''')
+            # Historique des lignes de logs des scripts continus (lu par le bot Discord via
+            # GET /api/services/logs, curseur = id croissant)
+            db.execute('''CREATE TABLE IF NOT EXISTS service_log_lines (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT, service_id TEXT, label TEXT,
+                            ts REAL, line TEXT)''')
             db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('lock_launch', '0')")
             db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('captcha_enabled', '0')")
             db.commit()
@@ -443,7 +448,8 @@ def create_app():
     app.teardown_appcontext(close_connection)
 
     EXEMPT_ENDPOINTS = {'auth.security_gate', 'auth.verify_gate', 'static', 'auth.callback_wiki', 'auth.login_wiki',
-                        'services.agent_sync'}  # l'agent distant s'authentifie par jeton, pas par session
+                        'services.agent_sync',  # l'agent distant s'authentifie par jeton, pas par session
+                        'services.api_service_logs'}  # le bot Discord s'authentifie par clé API
 
     @app.before_request
     def check_security_gate():
