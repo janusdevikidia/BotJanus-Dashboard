@@ -12,6 +12,7 @@ page de contrôle ou qu'un ordre est en attente.
 Routes :
   POST /api/agent/sync                    agent  : jeton Bearer (AGENT_TOKEN)
   GET  /api/services/logs?after=<id>      bot Discord : clé API (X-API-Key) ; nouvelles lignes de logs
+  GET  /api/services/events?after=<id>    bot Discord : clé API ; ordres start/stop/restart terminés
   GET  /api/services/status               public : état résumé (carte) ; ?watch=1 = page admin ouverte
   GET  /admin/services                    admin  : page de contrôle
   GET  /admin/services/<id>/logs          admin  : dernières lignes de journal (JSON)
@@ -65,6 +66,16 @@ def _new_lines(previous, current):
     return current
 
 
+def _expire_stale(db, now):
+    """Marque comme expirés les ordres jamais récupérés / sans résultat (appelé à chaque sync
+    de l'agent et à chaque lecture du flux d'événements, pour qu'un agent hors ligne ne
+    bloque pas les notifications)."""
+    db.execute("UPDATE agent_commands SET status='expired', result='non récupéré par l''agent', done_at=? "
+               "WHERE status='pending' AND requested_at < ?", (now, now - PENDING_TTL))
+    db.execute("UPDATE agent_commands SET status='expired', result='pas de résultat reçu', done_at=? "
+               "WHERE status='sent' AND requested_at < ?", (now, now - SENT_TTL))
+
+
 def _is_admin(db):
     if 'user_id' not in session:
         return False
@@ -108,10 +119,7 @@ def agent_sync():
         if isinstance(r, dict) and isinstance(r.get("id"), int):
             db.execute("UPDATE agent_commands SET status=?, result=?, done_at=? WHERE id=? AND status='sent'",
                        ("done" if r.get("ok") else "failed", str(r.get("message", ""))[:300], now, r["id"]))
-    db.execute("UPDATE agent_commands SET status='expired', result='non récupéré par l''agent' "
-               "WHERE status='pending' AND requested_at < ?", (now - PENDING_TTL,))
-    db.execute("UPDATE agent_commands SET status='expired', result='pas de résultat reçu' "
-               "WHERE status='sent' AND requested_at < ?", (now - SENT_TTL,))
+    _expire_stale(db, now)
 
     commands = []
     for row in db.execute("SELECT id, service_id, action, requested_by FROM agent_commands "
@@ -215,6 +223,44 @@ def api_service_logs():
     lines = [{"id": r["id"], "service": r["service_id"], "label": r["label"],
               "ts": r["ts"], "line": r["line"]} for r in rows]
     return jsonify(lines=lines, last_id=lines[-1]["id"] if lines else after)
+
+
+@services_bp.route("/api/services/events")
+@csrf.exempt
+@require_api_key
+def api_service_events():
+    """Passerelle vers le bot Discord : ordres start/stop/restart terminés (réussis, échoués ou
+    expirés) dont l'id est > `after`. `after=latest` ne renvoie que le curseur courant.
+    Les ordres se terminent dans le désordre (deux scripts en parallèle) : on ne renvoie que
+    les ids situés avant le plus ancien ordre encore ouvert, pour que le curseur ne saute
+    jamais un événement. Réponse : {events: [{id, service, label, action, status, result,
+    requested_by, requested_at, done_at}], last_id}."""
+    db = get_db()
+    _expire_stale(db, time.time())
+    db.commit()
+    open_id = db.execute("SELECT MIN(id) FROM agent_commands WHERE status IN ('pending','sent')").fetchone()[0]
+    top = db.execute("SELECT COALESCE(MAX(id), 0) FROM agent_commands").fetchone()[0]
+    upper = (open_id - 1) if open_id else top
+    raw = request.args.get("after", "latest")
+    if raw == "latest":
+        return jsonify(events=[], last_id=upper)
+    try:
+        after = int(raw)
+    except ValueError:
+        return jsonify(error="paramètre 'after' invalide"), 400
+    if after > top:     # curseur d'avant une réinitialisation de la base
+        return jsonify(events=[], last_id=upper, reset=True)
+    limit = max(1, min(request.args.get("limit", 50, type=int), 100))
+    rows = db.execute("SELECT id, service_id, action, status, result, requested_by, requested_at, done_at "
+                      "FROM agent_commands WHERE id > ? AND id <= ? AND status IN ('done','failed','expired') "
+                      "ORDER BY id LIMIT ?", (after, upper, limit)).fetchall()
+    services, _logs, _u, _w = _snapshot(db)
+    labels = {str(s.get("id")): s.get("label") or str(s.get("id")) for s in services}
+    events = [{"id": r["id"], "service": r["service_id"], "label": labels.get(r["service_id"], r["service_id"]),
+               "action": r["action"], "status": r["status"], "result": r["result"],
+               "requested_by": r["requested_by"], "requested_at": r["requested_at"],
+               "done_at": r["done_at"] or r["requested_at"]} for r in rows]
+    return jsonify(events=events, last_id=events[-1]["id"] if events else after)
 
 
 @services_bp.route("/admin/services")
